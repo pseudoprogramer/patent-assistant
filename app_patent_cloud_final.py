@@ -47,8 +47,9 @@ def get_uploaded_files_list(_api_key):
         st.error(f"Google 서버에서 파일 목록을 가져오는 데 실패했습니다: {e}")
         return []
 
-# 특허 번호를 감지하는 정규 표현식
-PATENT_NUMBER_REGEX = re.compile(r'\b((?:US|KR|CN|JP|EP)\s*\d+[A-Z\d]*)\b', re.IGNORECASE)
+# [개선] 특허 번호를 더 정확하게 감지하는 정규 표현식
+PATENT_NUMBER_REGEX = re.compile(r'\b((?:US|KR|CN|JP|EP)\s*[\d]+(?:[\s.]?[A-Z]\d?)?)\b', re.IGNORECASE)
+
 
 # --- 4. 메인 Q&A 로직 (듀얼 모드) ---
 if not gemini_api_key:
@@ -81,13 +82,15 @@ else:
                     
                     # --- 모드 1: 특정 특허 번호 요약 ---
                     if patent_match:
-                        patent_number_query = patent_match.group(1).replace(" ", "")
-                        st.info(f"'{patent_number_query}' 특허를 찾고 있습니다...")
+                        # [개선] 추출된 텍스트에서 공백, 마침표 등을 제거하여 정규화
+                        patent_number_query = re.sub(r'[\s.]', '', patent_match.group(1)).lower()
+                        st.info(f"정규화된 검색어 '{patent_number_query}'로 특허를 찾고 있습니다...")
                         
                         target_file = None
                         for f in uploaded_files:
-                            # 파일 이름에서 확장자를 제외하고 비교
-                            if patent_number_query.lower() in os.path.splitext(f.display_name)[0].lower():
+                            # [개선] 파일 이름도 동일하게 정규화하여 정확하게 비교
+                            filename_normalized = re.sub(r'[\s.]', '', os.path.splitext(f.display_name)[0]).lower()
+                            if patent_number_query == filename_normalized:
                                 target_file = f
                                 break
                         
@@ -103,7 +106,7 @@ else:
                                 except Exception as e:
                                     st.error(f"요약 중 오류 발생: {e}")
                         else:
-                            st.error(f"자료실에서 '{patent_number_query}'에 해당하는 파일을 찾지 못했습니다.")
+                            st.error(f"자료실에서 '{prompt.strip()}'에 해당하는 파일을 찾지 못했습니다.")
 
                     # --- 모드 2: 주제 기반 전체 검색 ---
                     else:
