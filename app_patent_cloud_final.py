@@ -22,10 +22,11 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("🤖 모델 선택")
+    # [수정] 사용자가 Gemini 2.5 모델을 선택할 수 있도록 옵션 변경
     selected_model = st.radio(
         "답변 생성 모델 선택:",
-        ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"),
-        captions=["최고 품질", "빠른 속도"],
+        ("gemini-2.5-pro", "gemini-2.5-flash"),
+        captions=["최고 품질 (2.5 Pro)", "최신/균형 (2.5 Flash)"],
         horizontal=True
     )
 
@@ -47,7 +48,6 @@ def get_uploaded_files_list(_api_key):
         return []
 
 # [업그레이드] 특허 번호를 더 유연하게 감지하는 정규 표현식
-# (US|KR|CN|JP|EP)로 시작하고, 중간에 공백이나 점이 있어도 되며, 뒤에 문자(A1, B, P 등)가 붙어도 되는 패턴
 PATENT_NUMBER_REGEX = re.compile(r'((?:US|KR|CN|JP|EP)[\s.]?\d+[A-Z\d]*)', re.IGNORECASE)
 
 # --- 4. 메인 Q&A 로직 (듀얼 모드) ---
