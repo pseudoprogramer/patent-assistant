@@ -22,11 +22,11 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("🤖 모델 선택")
-    # [수정] 사용자가 Gemini 2.5 모델을 선택할 수 있도록 옵션 변경 및 기본값 설정
+    # [수정] 최신 2.5 모델을 사용하도록 옵션 변경
     selected_model = st.radio(
         "답변 생성 모델 선택:",
-        ("gemini-2.5-pro-latest", "gemini-2.5-flash-latest", "gemini-1.5-flash-latest"),
-        captions=["최고 품질 (2.5 Pro)", "최신/균형 (2.5 Flash)", "가장 빠름 (1.5 Flash)"],
+        ("gemini-2.5-pro", "gemini-2.5-flash"),
+        captions=["최고 품질 (2.5 Pro)", "최신/균형 (2.5 Flash)"],
         horizontal=True,
         index=0 # 기본값으로 2.5 Pro 선택
     )
