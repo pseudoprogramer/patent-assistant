@@ -61,18 +61,8 @@ else:
         if not uploaded_files:
             st.warning("Google 서버에 사용 가능한 파일이 없습니다. 파일 업로드가 완료되었는지 확인해주세요.")
         else:
-            # [핵심] Gemini가 파일을 참조하도록 'Tool' 설정
-            file_retrieval_tool = genai.Tool(
-                file_retrieval=genai.tool.FileRetrieval(
-                    files=uploaded_files,
-                )
-            )
-            
-            # 답변 생성을 위한 모델 초기화
-            model = genai.GenerativeModel(
-                model_name=selected_model,
-                tools=[file_retrieval_tool]
-            )
+            # [수정] 모델을 먼저 간단하게 초기화합니다.
+            model = genai.GenerativeModel(model_name=selected_model)
 
             # 채팅 UI 초기화
             if "messages" not in st.session_state:
@@ -90,8 +80,9 @@ else:
                 with st.chat_message("assistant"):
                     with st.spinner(f"Gemini {selected_model} 모델이 당신의 특허 자료실을 분석하는 중..."):
                         try:
-                            # [핵심] 모델에 질문하여 답변 생성
-                            response = model.generate_content(prompt)
+                            # [수정] 모델에 질문(prompt)과 파일 목록(uploaded_files)을 함께 전달합니다.
+                            # 이것이 바로 grounding을 수행하는 가장 최신 방식입니다.
+                            response = model.generate_content([prompt] + uploaded_files)
                             
                             response_text = response.text
                             st.markdown(response_text)
@@ -99,6 +90,7 @@ else:
 
                             # [핵심] 답변의 근거가 된 출처 표시 (Attributed Question Answering)
                             try:
+                                # 응답 객체에서 citation_metadata를 안전하게 가져옵니다.
                                 citations = response.candidates[0].citation_metadata.citation_sources
                                 if citations:
                                     with st.expander("답변 근거 보기 (참고 특허)"):
@@ -110,7 +102,8 @@ else:
                                                     file_name = f.display_name
                                                     break
                                             st.write(f"📄 **{file_name}**")
-                            except (AttributeError, IndexError):
+                            except (AttributeError, IndexError, TypeError):
+                                # citation_metadata가 없는 경우 무시
                                 pass
 
                         except exceptions.ResourceExhausted as e:
