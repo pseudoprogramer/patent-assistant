@@ -1,0 +1,43 @@
+# Local secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Patent data and generated artifacts
+*.sqlite
+*.sqlite3
+*.db
+*.jsonl
+*.log
+runtime/
+logs/
+raw_invalid/
+quarantine/
+cache/
+tmp/
+raw_patents/
+parsed_json/
+minimal_analysis/
+analysis/
+briefs/
+reports/
+db_snapshots/
+outputs/
+
+# Large media / generated files
+*.pdf
+*.zip
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.webp
+
+# macOS
+.DS_Store

@@ -2,3 +2,4 @@ streamlit
 requests
 langchain
 langchain-google-genai
+pymupdf
