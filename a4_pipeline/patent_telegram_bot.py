@@ -28,6 +28,7 @@ from patent_dictionary_ask import (  # noqa: E402
     infer_search_query,
 )
 from patent_dictionary_search import DEFAULT_DB, lookup, search  # noqa: E402
+from patent_judge import judge_question  # noqa: E402
 
 
 DEFAULT_LOG_PATH = Path("/Volumes/외장 2TB/cpu2026/common/runtime/logs/A4/patent_telegram_chat.jsonl")
@@ -138,6 +139,8 @@ class TelegramClient:
             {
                 "commands": [
                     {"command": "ask", "description": "특허 사전에 질문하고 로컬 LLM 답변 받기"},
+                    {"command": "ask_pro", "description": "GPT/Gemini가 로컬 근거를 보고 판단"},
+                    {"command": "verify", "description": "특정 특허/요약을 근거 기반 검증"},
                     {"command": "search", "description": "관련 특허 후보 카드 검색"},
                     {"command": "patent", "description": "patent_id로 특정 특허 조회"},
                     {"command": "status", "description": "인덱스 상태 확인"},
@@ -331,6 +334,8 @@ class PatentTelegramBot:
         return (
             "특허 사전 봇 명령어\n"
             "/ask 질문 - 관련 특허를 찾아 로컬 LLM으로 답변\n"
+            "/ask_pro 질문 - GPT/Gemini가 검색 계획을 세우고 근거 기반 답변\n"
+            "/verify 질문 - 특정 특허나 요약의 정확성 검증\n"
             "/search 키워드 - 후보 카드만 빠르게 검색, 기본 10건\n"
             "/search 20 키워드 - 후보 개수 지정, 최대 30건\n"
             "/patent patent_id - 특정 특허 카드 조회\n"
@@ -370,10 +375,54 @@ class PatentTelegramBot:
                 }
             )
 
+    def run_pro_job(self, chat_id: int, original_text: str, question: str, mode: str) -> None:
+        started = time.monotonic()
+        try:
+            result = judge_question(question, provider="auto", planner_provider="auto", limit=self.limit, timeout=self.timeout)
+            answer = (
+                f"판단 모드: {mode}\n"
+                f"Provider: {result['provider']} / {result['model']}\n"
+                f"Planner: {result['planner_provider']} / {result['planner_model']}\n"
+                f"생성 시간: {result['elapsed_sec']}초\n\n"
+                f"{result['answer']}"
+            )
+            self.telegram.send_message(chat_id, answer)
+            self.log_event(
+                {
+                    "event": "pro_answer",
+                    "chat_id": chat_id,
+                    "text": original_text,
+                    "mode": mode,
+                    "elapsed_sec": round(time.monotonic() - started, 1),
+                    "answer": answer,
+                    "query_plan": result["evidence_pack"].get("query_plan"),
+                    "retrieved_patents": [c["patent_id"] for c in result["evidence_pack"].get("retrieved_cards", [])],
+                }
+            )
+        except Exception as exc:
+            answer = f"프로 판단 처리 중 오류가 났어: {exc}"
+            self.telegram.send_message(chat_id, answer)
+            self.log_event(
+                {
+                    "event": "pro_error",
+                    "chat_id": chat_id,
+                    "text": original_text,
+                    "mode": mode,
+                    "elapsed_sec": round(time.monotonic() - started, 1),
+                    "error": repr(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+
     def enqueue_ask(self, chat_id: int, original_text: str, question: str) -> None:
         self.telegram.send_message(chat_id, "질문 받았어. 관련 특허를 찾고 로컬 LLM으로 답변 생성 중이야.")
         self.log_event({"event": "ask_queued", "chat_id": chat_id, "text": original_text, "question": question})
         self.ask_executor.submit(self.run_ask_job, chat_id, original_text, question)
+
+    def enqueue_pro(self, chat_id: int, original_text: str, question: str, mode: str) -> None:
+        self.telegram.send_message(chat_id, "프로 판단 질문 받았어. GPT/Gemini가 검색 계획을 만들고 로컬 근거를 검토하는 중이야.")
+        self.log_event({"event": "pro_queued", "chat_id": chat_id, "text": original_text, "question": question, "mode": mode})
+        self.ask_executor.submit(self.run_pro_job, chat_id, original_text, question, mode)
 
     def handle_text(self, chat_id: int, text: str) -> Optional[str]:
         text = self.strip_bot_suffix(text.strip())
@@ -396,6 +445,18 @@ class PatentTelegramBot:
             if len(cards) > 1:
                 return "후보가 여러 개 잡혔어. 더 정확한 번호로 다시 물어봐.\n\n" + self.format_cards(cards)
             return self.format_patent_detail(cards[0])
+        if text.startswith("/ask_pro"):
+            question = text.removeprefix("/ask_pro").strip()
+            if not question:
+                return "질문을 같이 보내줘. 예: /ask_pro page buffer와 bit line 관련 특허 비교해줘"
+            self.enqueue_pro(chat_id, text, question, "ask_pro")
+            return None
+        if text.startswith("/verify"):
+            question = text.removeprefix("/verify").strip()
+            if not question:
+                return "검증할 특허나 요약을 같이 보내줘. 예: /verify 0012062403 이 요약이 맞는지 봐줘"
+            self.enqueue_pro(chat_id, text, question, "verify")
+            return None
         if text.startswith("/ask"):
             question = text.removeprefix("/ask").strip()
             if not question:
