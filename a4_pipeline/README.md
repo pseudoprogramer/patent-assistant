@@ -20,6 +20,7 @@ cd "/Volumes/외장 2TB/cpu2026/common/code"
 python build_evidence_db.py --image-folders --no-quarantine
 python patent_minimal_index.py --limit 100
 python build_minimal_search_index.py
+python build_evidence_units.py
 python patent_dictionary_search.py "page buffer bit line" --limit 10
 python patent_dictionary_ask.py "page buffer와 bit line 제어 관련 특허 후보 비교해줘"
 python evidence_pack.py "0012062403 특허에 대해서 알려줘" --provider none --limit 3
@@ -31,8 +32,16 @@ python patent_judge.py "0012062403 특허의 핵심을 근거 중심으로 알�
 The pro path separates retrieval from judgment:
 
 1. GPT/Gemini/Ollama converts the user question into a compact search plan.
-2. Local SQLite search retrieves patent cards and claim/figure evidence.
-3. GPT/Gemini/Ollama judges only the retrieved evidence pack.
+2. Local SQLite search retrieves patent cards and claim/figure evidence units.
+3. The reranker scores candidates with `why_selected`, `weaknesses`, and top claim/figure units.
+4. GPT/Gemini/Ollama judges only the retrieved evidence pack.
+
+Build the evidence-unit index whenever minimal/evidence data changes:
+
+```bash
+python build_evidence_units.py
+python evidence_reranker.py "page buffer bit line voltage control" --limit 5
+```
 
 Create a local `.env` from `.env.example` and set keys as needed:
 

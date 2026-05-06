@@ -16,6 +16,13 @@ from llm_clients import LLMClient, json_from_text  # noqa: E402
 from patent_dictionary_ask import infer_search_query  # noqa: E402
 from patent_dictionary_search import DEFAULT_DB, lookup, search  # noqa: E402
 
+try:
+    from build_evidence_units import DEFAULT_UNITS_DB  # noqa: E402
+    from evidence_reranker import rank_evidence  # noqa: E402
+except Exception:
+    DEFAULT_UNITS_DB = Path("/Volumes/외장 2TB/cpu2026/patent_hub/outputs/indexes/A4/patent_evidence_units.sqlite")
+    rank_evidence = None  # type: ignore[assignment]
+
 
 DEFAULT_EVIDENCE_DB = Path("/Volumes/외장 2TB/cpu2026/common/runtime/db/patent_A4.sqlite")
 PATENT_ID_RE = re.compile(r"\b(?:us|cn|kr)[a-z0-9]{6,}p\b", re.IGNORECASE)
@@ -246,9 +253,39 @@ def build_evidence_pack(
     planner_client: Optional[LLMClient] = None,
     index_db: Path = DEFAULT_DB,
     evidence_db: Path = DEFAULT_EVIDENCE_DB,
+    units_db: Path = DEFAULT_UNITS_DB,
     limit: int = 8,
 ) -> Dict[str, Any]:
     plan = make_query_plan(question, planner_client, limit=limit)
+    if rank_evidence is not None and Path(units_db).exists():
+        ranked = rank_evidence(question, plan, index_db=Path(index_db), units_db=Path(units_db), limit=limit)
+        cards = [item["card"] for item in ranked]
+        return {
+            "question": question,
+            "query_plan": plan,
+            "retrieved_cards": [compact_card(card) for card in cards],
+            "ranked_candidates": [
+                {
+                    "patent_id": item["patent_id"],
+                    "score": item["score"],
+                    "why_selected": item["why_selected"],
+                    "weaknesses": item["weaknesses"],
+                    "top_units": item["top_units"],
+                }
+                for item in ranked
+            ],
+            "evidence": [
+                {
+                    "patent_id": item["patent_id"],
+                    "units": item["top_units"],
+                    "why_selected": item["why_selected"],
+                    "weaknesses": item["weaknesses"],
+                }
+                for item in ranked
+            ],
+            "limits": {"max_results": limit, "claim_chars": 1200, "reranker": "evidence_units"},
+        }
+
     cards = retrieve_cards(plan, index_db=index_db)
     evidence: List[Dict[str, Any]] = []
     if evidence_db.exists():
@@ -271,10 +308,11 @@ def main() -> None:
     parser.add_argument("--provider", default="none", choices=["none", "auto", "openai", "gemini", "ollama"])
     parser.add_argument("--model", default="")
     parser.add_argument("--limit", type=int, default=8)
+    parser.add_argument("--units-db", default=str(DEFAULT_UNITS_DB))
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     client = None if args.provider == "none" else LLMClient(args.provider, model=args.model or None)
-    pack = build_evidence_pack(args.question, planner_client=client, limit=args.limit)
+    pack = build_evidence_pack(args.question, planner_client=client, units_db=Path(args.units_db), limit=args.limit)
     print(json.dumps(pack, ensure_ascii=False, indent=2))
 
 
