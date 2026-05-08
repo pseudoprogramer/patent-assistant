@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import time
@@ -20,8 +21,8 @@ A4_LOGS = COMMON / "runtime" / "logs" / "A4"
 A4_RAW_INVALID = COMMON / "runtime" / "raw_invalid" / "A4" / "minimal"
 MINIMAL_DIR = HUB / "outputs" / "minimal_analysis" / "A4"
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "qwen3:14b"
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:14b")
 KEEP_ALIVE = -1
 TEMPERATURE = 0.02
 SEED = 42
@@ -2039,13 +2040,22 @@ def process_one_patent(con: sqlite3.Connection, patent_id: str, overwrite: bool 
 
 
 def main() -> None:
+    global A4_DB, MINIMAL_DIR, MODEL
+
     parser = argparse.ArgumentParser(description="Generate minimal indexing JSON from evidence DB.")
     parser.add_argument("--limit", type=int, default=1, help="How many patents to process")
     parser.add_argument("--patent-id", type=str, default=None, help="Specific patent_id to process")
     parser.add_argument("--patent-list-file", type=str, default=None, help="Text file with one patent_id per line")
     parser.add_argument("--skip", type=int, default=0, help="Skip this many targets from the ordered batch list")
     parser.add_argument("--overwrite", action="store_true", help="Regenerate even if output exists")
+    parser.add_argument("--db", type=str, default=str(A4_DB), help="Evidence SQLite DB to read")
+    parser.add_argument("--model", type=str, default=MODEL, help="Ollama model name")
+    parser.add_argument("--output-dir", type=str, default=str(MINIMAL_DIR), help="Directory for minimal JSON outputs")
     args = parser.parse_args()
+
+    A4_DB = Path(args.db)
+    MINIMAL_DIR = Path(args.output_dir)
+    MODEL = args.model
 
     ensure_dirs()
     init_log_file()

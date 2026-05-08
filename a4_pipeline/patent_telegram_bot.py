@@ -29,6 +29,9 @@ from patent_dictionary_ask import (  # noqa: E402
 )
 from patent_dictionary_search import DEFAULT_DB, lookup, search  # noqa: E402
 from patent_judge import judge_question  # noqa: E402
+from llm_clients import load_env_file  # noqa: E402
+from patent_local_triage import format_triage, triage_question  # noqa: E402
+from patent_auto_mission import format_mission_summary, run_mission  # noqa: E402
 
 
 DEFAULT_LOG_PATH = Path("/Volumes/외장 2TB/cpu2026/common/runtime/logs/A4/patent_telegram_chat.jsonl")
@@ -36,6 +39,8 @@ TELEGRAM_MAX_MESSAGE = 3900
 MAX_SEARCH_LIMIT = 30
 PATENT_ID_RE = re.compile(r"\b(?:us|cn|kr)[a-z0-9]{6,}p\b", re.IGNORECASE)
 PATENT_NUMBER_RE = re.compile(r"\d{7,}")
+TELEGRAM_TOKEN_IN_URL_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+TELEGRAM_TOKEN_VALUE_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 
 
 def utc_now() -> str:
@@ -50,6 +55,17 @@ def parse_allowed_chat_ids(value: str) -> Set[int]:
             continue
         ids.add(int(part))
     return ids
+
+
+def redact_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: redact_secrets(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_secrets(item) for item in value]
+    if isinstance(value, str):
+        value = TELEGRAM_TOKEN_IN_URL_RE.sub("bot<redacted>", value)
+        value = TELEGRAM_TOKEN_VALUE_RE.sub("<telegram-token-redacted>", value)
+    return value
 
 
 def split_message(text: str, limit: int = TELEGRAM_MAX_MESSAGE) -> Iterable[str]:
@@ -139,6 +155,9 @@ class TelegramClient:
             {
                 "commands": [
                     {"command": "ask", "description": "특허 사전에 질문하고 로컬 LLM 답변 받기"},
+                    {"command": "triage", "description": "Gemini 없이 로컬 후보 예비심사"},
+                    {"command": "compare_local", "description": "Gemini 전에 로컬 후보 비교"},
+                    {"command": "mission", "description": "목표를 주면 로컬 LLM이 자동 분석 리포트 작성"},
                     {"command": "ask_pro", "description": "GPT/Gemini가 로컬 근거를 보고 판단"},
                     {"command": "verify", "description": "특정 특허/요약을 근거 기반 검증"},
                     {"command": "search", "description": "관련 특허 후보 카드 검색"},
@@ -175,7 +194,7 @@ class PatentTelegramBot:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def log_event(self, event: Dict[str, Any]) -> None:
-        event = {"ts": utc_now(), **event}
+        event = redact_secrets({"ts": utc_now(), **event})
         with self.log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
@@ -334,6 +353,9 @@ class PatentTelegramBot:
         return (
             "특허 사전 봇 명령어\n"
             "/ask 질문 - 관련 특허를 찾아 로컬 LLM으로 답변\n"
+            "/triage 키워드 - Gemini 없이 로컬 후보 예비심사\n"
+            "/compare_local 키워드 - Gemini 전에 로컬 후보 비교/압축\n"
+            "/mission 목표 - 목표를 주면 로컬 LLM이 후보 수집부터 리포트까지 자동 실행\n"
             "/ask_pro 질문 - GPT/Gemini가 검색 계획을 세우고 근거 기반 답변\n"
             "/verify 질문 - 특정 특허나 요약의 정확성 검증\n"
             "/search 키워드 - 후보 카드만 빠르게 검색, 기본 10건\n"
@@ -343,6 +365,10 @@ class PatentTelegramBot:
             "/help - 도움말\n\n"
             "예: /ask page buffer와 bit line 제어 관련 특허 후보 비교해줘"
         )
+
+    def triage(self, question: str, limit: Optional[int] = None) -> str:
+        result = triage_question(question, limit=limit or self.limit)
+        return format_triage(result)
 
     def strip_bot_suffix(self, text: str) -> str:
         if not text.startswith("/"):
@@ -414,6 +440,46 @@ class PatentTelegramBot:
                 }
             )
 
+    def run_mission_job(self, chat_id: int, original_text: str, goal: str) -> None:
+        started = time.monotonic()
+        try:
+            result = run_mission(
+                goal,
+                model=self.model,
+                max_queries=5,
+                per_query_limit=max(6, min(12, self.limit)),
+                max_candidates=max(12, min(20, self.limit * 2)),
+                timeout=max(self.timeout, 360),
+            )
+            answer = format_mission_summary(result)
+            self.telegram.send_message(chat_id, answer)
+            self.log_event(
+                {
+                    "event": "mission_answer",
+                    "chat_id": chat_id,
+                    "text": original_text,
+                    "goal": goal,
+                    "elapsed_sec": round(time.monotonic() - started, 1),
+                    "report_path": result.get("report_path"),
+                    "json_path": result.get("json_path"),
+                    "candidate_patents": [c["patent_id"] for c in result.get("candidates", [])],
+                }
+            )
+        except Exception as exc:
+            answer = f"오토 미션 처리 중 오류가 났어: {exc}"
+            self.telegram.send_message(chat_id, answer)
+            self.log_event(
+                {
+                    "event": "mission_error",
+                    "chat_id": chat_id,
+                    "text": original_text,
+                    "goal": goal,
+                    "elapsed_sec": round(time.monotonic() - started, 1),
+                    "error": repr(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+
     def enqueue_ask(self, chat_id: int, original_text: str, question: str) -> None:
         self.telegram.send_message(chat_id, "질문 받았어. 관련 특허를 찾고 로컬 LLM으로 답변 생성 중이야.")
         self.log_event({"event": "ask_queued", "chat_id": chat_id, "text": original_text, "question": question})
@@ -423,6 +489,11 @@ class PatentTelegramBot:
         self.telegram.send_message(chat_id, "프로 판단 질문 받았어. GPT/Gemini가 검색 계획을 만들고 로컬 근거를 검토하는 중이야.")
         self.log_event({"event": "pro_queued", "chat_id": chat_id, "text": original_text, "question": question, "mode": mode})
         self.ask_executor.submit(self.run_pro_job, chat_id, original_text, question, mode)
+
+    def enqueue_mission(self, chat_id: int, original_text: str, goal: str) -> None:
+        self.telegram.send_message(chat_id, "오토 미션 받았어. 로컬 LLM이 검색 계획을 만들고 후보를 모아서 리포트 작성 중이야.")
+        self.log_event({"event": "mission_queued", "chat_id": chat_id, "text": original_text, "goal": goal})
+        self.ask_executor.submit(self.run_mission_job, chat_id, original_text, goal)
 
     def handle_text(self, chat_id: int, text: str) -> Optional[str]:
         text = self.strip_bot_suffix(text.strip())
@@ -445,6 +516,22 @@ class PatentTelegramBot:
             if len(cards) > 1:
                 return "후보가 여러 개 잡혔어. 더 정확한 번호로 다시 물어봐.\n\n" + self.format_cards(cards)
             return self.format_patent_detail(cards[0])
+        if text.startswith("/triage"):
+            query, triage_limit = parse_limited_query(text.removeprefix("/triage").strip(), self.limit)
+            if not query:
+                return "예비심사할 키워드를 같이 보내줘. 예: /triage 12 page buffer bit line program verify"
+            return self.triage(query, limit=triage_limit)
+        if text.startswith("/compare_local"):
+            query, triage_limit = parse_limited_query(text.removeprefix("/compare_local").strip(), self.limit)
+            if not query:
+                return "로컬 비교할 키워드를 같이 보내줘. 예: /compare_local 8 page buffer bit line program verify"
+            return self.triage(query + " 비교", limit=triage_limit)
+        if text.startswith("/mission"):
+            goal = text.removeprefix("/mission").strip()
+            if not goal:
+                return "목표를 같이 보내줘. 예: /mission page buffer와 bit line 제어 특허를 묶고 핵심 후보를 골라줘"
+            self.enqueue_mission(chat_id, text, goal)
+            return None
         if text.startswith("/ask_pro"):
             question = text.removeprefix("/ask_pro").strip()
             if not question:
@@ -517,6 +604,7 @@ class PatentTelegramBot:
 
 
 def main() -> None:
+    load_env_file()
     parser = argparse.ArgumentParser(description="Telegram chat interface for the local patent dictionary.")
     parser.add_argument("--db", default=str(DEFAULT_DB))
     parser.add_argument("--log", default=str(DEFAULT_LOG_PATH))

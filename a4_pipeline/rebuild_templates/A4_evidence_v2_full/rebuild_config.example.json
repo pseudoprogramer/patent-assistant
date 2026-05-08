@@ -1,0 +1,18 @@
+{
+  "name": "A4 evidence v2 full rebuild",
+  "created_date": "2026-05-08",
+  "raw_inbox": "/Volumes/외장 2TB/cpu2026/patent_hub/raw_patents/inbox/A4",
+  "code_dir": "/Volumes/외장 2TB/cpu2026/common/code",
+  "rebuild_root": "/Volumes/외장 2TB/cpu2026/rebuilds/A4_evidence_v2_full_20260508",
+  "evidence_db": "/Volumes/외장 2TB/cpu2026/rebuilds/A4_evidence_v2_full_20260508/db/patent_A4_evidence_v2_full.sqlite",
+  "parsed_json_dir": "/Volumes/외장 2TB/cpu2026/rebuilds/A4_evidence_v2_full_20260508/parsed_json",
+  "evidence_pack_db": "/Volumes/외장 2TB/cpu2026/rebuilds/A4_evidence_v2_full_20260508/indexes/patent_evidence_pack_index.sqlite",
+  "minimal_db_placeholder": "/Volumes/외장 2TB/cpu2026/rebuilds/A4_evidence_v2_full_20260508/indexes/patent_minimal_index.sqlite",
+  "minimal_json_dir": "/Volumes/외장 2TB/cpu2026/rebuilds/A4_evidence_v2_full_20260508/minimal_analysis",
+  "report_dir": "/Volumes/외장 2TB/cpu2026/rebuilds/A4_evidence_v2_full_20260508/reports",
+  "log_dir": "/Volumes/외장 2TB/cpu2026/rebuilds/A4_evidence_v2_full_20260508/logs",
+  "raw_invalid_dir": "/Volumes/외장 2TB/cpu2026/rebuilds/A4_evidence_v2_full_20260508/raw_invalid",
+  "parser_version": "evidence_db_v2.0",
+  "minimal_model": "qwen3:14b"
+}
+

@@ -123,6 +123,40 @@ def candidate_cards(plan: Dict[str, Any], index_db: Path, limit: int) -> Dict[st
     return cards
 
 
+def patent_number_candidate_ids(plan: Dict[str, Any], index_db: Path, limit: int) -> List[str]:
+    con = sqlite3.connect(index_db)
+    out: List[str] = []
+    seen: Set[str] = set()
+    for value in [str(x).strip().lower() for x in plan.get("patent_numbers", []) or []]:
+        if not value:
+            continue
+        exact = lookup(con, value)
+        if exact and exact["patent_id"] not in seen:
+            out.append(exact["patent_id"])
+            seen.add(exact["patent_id"])
+        fragments = unique_keep_order([value, value.lstrip("0") or value])
+        for fragment in fragments:
+            rows = con.execute(
+                """
+                SELECT patent_id
+                FROM minimal_index
+                WHERE patent_id LIKE ?
+                ORDER BY length(patent_id), patent_id
+                LIMIT ?
+                """,
+                (f"%{fragment}%", limit),
+            ).fetchall()
+            for (patent_id,) in rows:
+                if patent_id not in seen:
+                    out.append(patent_id)
+                    seen.add(patent_id)
+                if len(out) >= limit:
+                    con.close()
+                    return out
+    con.close()
+    return out
+
+
 def fetch_units_by_fts(units_con: sqlite3.Connection, terms: List[str], limit: int) -> List[Dict[str, Any]]:
     match = fts_query_for_terms(terms)
     if not match:
@@ -187,7 +221,7 @@ def score_unit(unit: Dict[str, Any], terms: List[str]) -> Tuple[float, List[str]
         why.append(f"{unit['unit_ref']} is an independent claim")
     elif unit["unit_type"] == "claim" and dependent_like:
         score -= 1.6
-        weaknesses.append(f"{unit['unit_ref']} appears dependent despite parser claim_type")
+        weaknesses.append(f"{unit['unit_ref']} is dependent claim evidence, weaker than independent claim text")
     if unit["unit_type"] == "minimal_summary":
         score += 0.7
     if unit["unit_type"] == "figure":
@@ -236,9 +270,19 @@ def rank_evidence(
     units_per_patent: int = 4,
 ) -> List[Dict[str, Any]]:
     terms = query_terms(question, plan)
+    direct_patent_ids = patent_number_candidate_ids(plan, index_db=index_db, limit=limit)
     cards = candidate_cards(plan, index_db=index_db, limit=limit)
+    if direct_patent_ids:
+        index_con = sqlite3.connect(index_db)
+        direct_cards: Dict[str, Dict[str, Any]] = {}
+        for patent_id in direct_patent_ids:
+            card = cards.get(patent_id) or lookup(index_con, patent_id)
+            if card:
+                direct_cards[patent_id] = card
+        index_con.close()
+        cards = direct_cards
     units_con = sqlite3.connect(units_db)
-    units = fetch_units_by_fts(units_con, terms, limit=max(100, limit * 20))
+    units = [] if direct_patent_ids else fetch_units_by_fts(units_con, terms, limit=max(100, limit * 20))
     units.extend(fetch_units_for_patents(units_con, cards.keys(), limit_per_patent=8))
     units_con.close()
 
@@ -277,7 +321,11 @@ def rank_evidence(
                 "score": None,
             }
         patent_score = sum(item[0] for item in top) + math.log1p(len(scored_units)) * 0.3
+        if patent_id in direct_patent_ids:
+            patent_score += 100.0
         why_all = unique_keep_order(reason for item in top for reason in item[2])[:8]
+        if patent_id in direct_patent_ids:
+            why_all = unique_keep_order(["explicit patent number match", *why_all])[:8]
         weak_all = unique_keep_order(reason for item in top for reason in item[3])[:8]
         results.append(
             {

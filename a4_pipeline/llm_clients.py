@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -9,6 +10,7 @@ import requests
 
 
 DEFAULT_ENV_PATH = Path("/Volumes/외장 2TB/cpu2026/common/code/.env")
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def load_env_file(path: str | Path = DEFAULT_ENV_PATH) -> None:
@@ -45,6 +47,30 @@ def extract_gemini_text(data: Dict[str, Any]) -> str:
             if "text" in part:
                 parts.append(str(part["text"]))
     return "\n".join(parts).strip()
+
+
+def post_json_with_retries(
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    timeout: int,
+    attempts: int = 3,
+) -> requests.Response:
+    last_response: Optional[requests.Response] = None
+    for attempt in range(1, attempts + 1):
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if response.status_code not in RETRYABLE_STATUS_CODES or attempt == attempts:
+            return response
+        last_response = response
+        retry_after = response.headers.get("Retry-After", "")
+        try:
+            delay = float(retry_after)
+        except Exception:
+            delay = min(12.0, 2.0 ** attempt)
+        time.sleep(delay)
+    if last_response is not None:
+        return last_response
+    raise RuntimeError("No response returned from model API")
 
 
 class LLMClient:
@@ -111,10 +137,10 @@ class LLMClient:
         # Some reasoning models ignore or reject temperature; keep it opt-in for compatibility.
         if os.environ.get("OPENAI_USE_TEMPERATURE", "").lower() in {"1", "true", "yes"}:
             payload["temperature"] = temperature
-        r = requests.post(
+        r = post_json_with_retries(
             "https://api.openai.com/v1/responses",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
+            payload=payload,
             timeout=self.timeout,
         )
         r.raise_for_status()
@@ -136,10 +162,10 @@ class LLMClient:
                 "temperature": temperature,
             },
         }
-        r = requests.post(
+        r = post_json_with_retries(
             url,
             headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-            json=payload,
+            payload=payload,
             timeout=self.timeout,
         )
         r.raise_for_status()
@@ -154,6 +180,7 @@ class LLMClient:
             "model": self.model,
             "prompt": f"{instructions.strip()}\n\n{prompt}".strip(),
             "stream": False,
+            "think": False,
             "options": {
                 "temperature": temperature,
                 "num_ctx": 12000,
@@ -162,7 +189,8 @@ class LLMClient:
         }
         r = requests.post(url, json=payload, timeout=self.timeout)
         r.raise_for_status()
-        return str(r.json().get("response", "")).strip()
+        data = r.json()
+        return str(data.get("response") or data.get("thinking") or "").strip()
 
 
 def json_from_text(text: str) -> Dict[str, Any]:

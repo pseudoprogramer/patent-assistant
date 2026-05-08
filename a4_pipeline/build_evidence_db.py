@@ -41,7 +41,7 @@ except Exception:
         for p in [A4_LOGS, A4_QUARANTINE, A4_TMP, A4_CACHE, A4_RAW_INVALID]:
             Path(p).mkdir(parents=True, exist_ok=True)
 
-PARSER_VERSION = "evidence_db_v1.2"
+PARSER_VERSION = "evidence_db_v1.3"
 LOG_FILE_PATH = None
 
 
@@ -301,7 +301,12 @@ def infer_parent_claim_no(country: str, claim_text: str) -> str | None:
     if country == "CN":
         patterns = [
             r"根据权利要求\s*(\d+)\s*所述",
+            r"如权利要求\s*(\d+)\s*所述",
+            r"权利要求\s*(\d+)\s*所述",
+            r"(?:根据|如)权利要求\s*(\d+)\s*(?:至|-|~|到)\s*\d+\s*(?:任一项|中任一项)?",
+            r"(?:根据|如)权利要求\s*(\d+)\s*(?:任一项|中任一项)",
             r"根据权利要求\s*([0-9]+)",
+            r"如权利要求\s*([0-9]+)",
         ]
     elif country == "KR":
         patterns = [r"청구항\s*(\d+)에\s*있어서", r"청구항\s*(\d+)"]
@@ -312,6 +317,37 @@ def infer_parent_claim_no(country: str, claim_text: str) -> str | None:
         if m:
             return m.group(1)
     return None
+
+
+US_DRAWING_NOISE_RE = re.compile(r"(U\.S\.\s+Patent|Sheet\s+\d+\s+of\s+\d+|FIG\.?\s*\d+|cited by examiner)", re.I)
+US_CLAIM_LINE_RE = re.compile(
+    r"(?im)^\s*\d{1,3}\s*[\.:]\s+(?:A\b|A[A-Za-z]|An\b|The\b|In\b).*(?:comprising|claim|wherein|configured|including)"
+)
+US_CLAIM_SPLIT_RE = re.compile(
+    r"(?m)^\s*(\d{1,3})\s*[\.:]\s*(?=(?:A\b|A[A-Za-z]|An\b|The\b|In\b)|\(canceled\)|cancelled)",
+    re.I,
+)
+
+
+def _is_us_drawing_noise_page(text: str) -> bool:
+    if not text:
+        return False
+    if not US_DRAWING_NOISE_RE.search(text):
+        return False
+    return not bool(US_CLAIM_LINE_RE.search(text))
+
+
+def _us_claim_candidate_page(text: str, page_no: int, total_pages: int) -> bool:
+    if not text or _is_us_drawing_noise_page(text):
+        return False
+    if re.search(
+        r"(?i)what\s+is\s+claimed\s+is|the\s+invention\s+claimed\s+is|(?:^|\n)\s*(?:i|we)\s+claim\s*:?",
+        text,
+    ):
+        return True
+    if not US_CLAIM_LINE_RE.search(text):
+        return False
+    return page_no >= max(2, int(total_pages * 0.35))
 
 
 def find_first_page_for_snippet(pages: list[dict], snippet: str, allowed_pages: set[int] | None = None) -> int | None:
@@ -432,22 +468,19 @@ def parse_claims(country: str, pages: list[dict]) -> tuple[list[dict], set[int]]
     if claim_start_page is None:
         fallback_pages = pages[:8]
         if country == "US":
-            fallback_pages = pages[1:]
+            fallback_pages = [p for p in pages[1:] if _us_claim_candidate_page(p["text"], p["page_no"], len(pages))]
         for p in fallback_pages:
             if country == "US":
                 page_no = p["page_no"]
                 window = "\n".join(text_by_page.get(n, "") for n in range(page_no, min(len(pages) + 1, page_no + 3)))
-                starts = re.findall(r"(?m)^\s*(\d{1,3})\s*[\.:]\s+\S", p["text"])
+                starts = US_CLAIM_SPLIT_RE.findall(p["text"])
                 unique_starts = {int(n) for n in starts}
-                has_claim_language = re.search(
-                    r"(?im)^\s*\d{1,3}\s*[\.:]\s+(?:A|An|The|In)\b.*(?:comprising|claim|wherein)",
-                    p["text"],
-                )
+                has_claim_language = US_CLAIM_LINE_RE.search(p["text"])
                 has_canceled_range = re.search(r"(?im)^\s*\d{1,3}\s*-\s*\d{1,3}\s*[\.:]\s*\(canceled\)", p["text"])
                 has_numbered_claims = (
-                    re.search(r"(?m)^\s*1\s*[\.:]\s+\S", p["text"])
-                    and re.search(r"(?m)^\s*2\s*[\.:]\s+\S", window)
-                    and re.search(r"(?m)^\s*3\s*[\.:]\s+\S", window)
+                    re.search(r"(?im)^\s*1\s*[\.:]\s+(?:A\b|A[A-Za-z]|An\b|The\b|In\b)", p["text"])
+                    and re.search(r"(?im)^\s*2\s*[\.:]\s+(?:A\b|A[A-Za-z]|An\b|The\b|In\b|\(canceled\)|cancelled)", window)
+                    and re.search(r"(?im)^\s*3\s*[\.:]\s+(?:A\b|A[A-Za-z]|An\b|The\b|In\b|\(canceled\)|cancelled)", window)
                 )
                 has_late_claims = len(unique_starts) >= 3 and has_claim_language
                 has_terminal_claim = page_no >= len(pages) - 1 and has_claim_language and (1 in unique_starts or has_canceled_range)
@@ -484,6 +517,8 @@ def parse_claims(country: str, pages: list[dict]) -> tuple[list[dict], set[int]]
 
     if country == "KR":
         split_pat = r"(?m)^\s*청구항\s*(\d+)\s*"
+    elif country == "US":
+        split_pat = US_CLAIM_SPLIT_RE
     else:
         split_pat = r"(?m)^\s*(\d+)\s*[\.:]\s*"
 

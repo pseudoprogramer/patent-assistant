@@ -20,6 +20,8 @@ Answer in Korean, but preserve patent titles and technical terms in their source
 Use only the provided evidence pack. Do not invent patents, claims, figures, or facts.
 Every important assertion must cite patent_id and evidence id or claim_no/figure_no.
 If evidence is weak, noisy, OCR-contaminated, or insufficient, say so explicitly.
+Treat retrieval/ranker weaknesses as retrieval-quality notes, not as patent facts.
+If a claim is marked dependent or dependent_inferred, do not describe it as an independent claim.
 Prefer concise, concrete, comparison-oriented answers."""
 
 

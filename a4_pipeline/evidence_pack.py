@@ -27,6 +27,13 @@ except Exception:
 DEFAULT_EVIDENCE_DB = Path("/Volumes/외장 2TB/cpu2026/common/runtime/db/patent_A4.sqlite")
 PATENT_ID_RE = re.compile(r"\b(?:us|cn|kr)[a-z0-9]{6,}p\b", re.IGNORECASE)
 PATENT_NUMBER_RE = re.compile(r"\d{7,}")
+NOISY_TITLE_RE = re.compile(r"(onfrouler|g1iic|ceeee|wees|o\.\.|frorn|vaive)", re.I)
+TITLE_STOP_RE = re.compile(
+    r"\s+(?:\(\d{2}\)|Applicant:|Inventors?:|Assignee:|Notice:|Appl\. No\.:|Filed:|Prior Publication Data|"
+    r"Foreign Application Priority Data|Int\. Cl\.|U\.S\. Cl\.|Field of Classification|References Cited|"
+    r"Primary Examiner|Attorney, Agent, or Firm|\(57\)\s*ABSTRACT|ABSTRACT|U\.S\. Patent)",
+    re.I,
+)
 
 
 def unique_keep_order(items: List[str]) -> List[str]:
@@ -43,6 +50,46 @@ def unique_keep_order(items: List[str]) -> List[str]:
 def clip(value: Any, max_chars: int) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     return text[:max_chars]
+
+
+def clean_db_title(raw_title: Any) -> str:
+    title = clip(raw_title, 500)
+    title = TITLE_STOP_RE.split(title, maxsplit=1)[0]
+    title = re.sub(r"\s+", " ", title).strip(" -:;,.")
+    return title if len(title) >= 8 else ""
+
+
+def needs_title_override(title: Any) -> bool:
+    title = clip(title, 200)
+    if not title:
+        return True
+    return bool(NOISY_TITLE_RE.search(title))
+
+
+def apply_db_title_overrides(cards: List[Dict[str, Any]], evidence_db: Path) -> List[Dict[str, Any]]:
+    if not cards or not evidence_db.exists():
+        return cards
+    con = sqlite3.connect(evidence_db)
+    out: List[Dict[str, Any]] = []
+    for card in cards:
+        card = dict(card)
+        rows = con.execute(
+            "SELECT claim_no FROM claims WHERE patent_id=? AND claim_type='independent' ORDER BY CAST(claim_no AS INT)",
+            (card["patent_id"],),
+        ).fetchall()
+        if rows:
+            card["independent_claim_nos"] = [str(row[0]) for row in rows]
+        if needs_title_override(card.get("title")):
+            row = con.execute("SELECT title_raw FROM patents WHERE patent_id=? LIMIT 1", (card["patent_id"],)).fetchone()
+            fixed_title = clean_db_title(row[0]) if row else ""
+            if fixed_title:
+                old_title = card.get("title", "")
+                card["title"] = fixed_title
+                if needs_title_override(card.get("core_subject")) or card.get("core_subject") == old_title:
+                    card["core_subject"] = fixed_title
+        out.append(card)
+    con.close()
+    return out
 
 
 def extract_patent_id(text: str) -> str:
@@ -259,7 +306,12 @@ def build_evidence_pack(
     plan = make_query_plan(question, planner_client, limit=limit)
     if rank_evidence is not None and Path(units_db).exists():
         ranked = rank_evidence(question, plan, index_db=Path(index_db), units_db=Path(units_db), limit=limit)
-        cards = [item["card"] for item in ranked]
+        cards = apply_db_title_overrides([item["card"] for item in ranked], Path(evidence_db))
+        for item, card in zip(ranked, cards):
+            item["card"] = card
+            item["weaknesses"] = [
+                weakness for weakness in item.get("weaknesses", []) if "title appears OCR-noisy" not in weakness
+            ]
         return {
             "question": question,
             "query_plan": plan,
@@ -286,7 +338,7 @@ def build_evidence_pack(
             "limits": {"max_results": limit, "claim_chars": 1200, "reranker": "evidence_units"},
         }
 
-    cards = retrieve_cards(plan, index_db=index_db)
+    cards = apply_db_title_overrides(retrieve_cards(plan, index_db=index_db), Path(evidence_db))
     evidence: List[Dict[str, Any]] = []
     if evidence_db.exists():
         con = sqlite3.connect(evidence_db)
