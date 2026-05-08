@@ -32,6 +32,7 @@ from patent_judge import judge_question  # noqa: E402
 from llm_clients import load_env_file  # noqa: E402
 from patent_local_triage import format_triage, triage_question  # noqa: E402
 from patent_auto_mission import format_mission_summary, run_mission  # noqa: E402
+from patent_rebuild_approval import execute_action, format_pending, load_pending, reject_action  # noqa: E402
 
 
 DEFAULT_LOG_PATH = Path("/Volumes/외장 2TB/cpu2026/common/runtime/logs/A4/patent_telegram_chat.jsonl")
@@ -163,6 +164,9 @@ class TelegramClient:
                     {"command": "search", "description": "관련 특허 후보 카드 검색"},
                     {"command": "patent", "description": "patent_id로 특정 특허 조회"},
                     {"command": "status", "description": "인덱스 상태 확인"},
+                    {"command": "pending", "description": "대기 중인 파이프라인 승인 요청 확인"},
+                    {"command": "approve", "description": "승인 요청 실행"},
+                    {"command": "reject", "description": "승인 요청 거절"},
                     {"command": "help", "description": "사용법 보기"},
                 ]
             },
@@ -362,6 +366,9 @@ class PatentTelegramBot:
             "/search 20 키워드 - 후보 개수 지정, 최대 30건\n"
             "/patent patent_id - 특정 특허 카드 조회\n"
             "/status - 인덱스 상태 확인\n"
+            "/pending - 대기 중인 파이프라인 승인 요청 확인\n"
+            "/approve id 또는 승인 id - 승인 요청 실행\n"
+            "/reject id 또는 거절 id - 승인 요청 거절\n"
             "/help - 도움말\n\n"
             "예: /ask page buffer와 bit line 제어 관련 특허 후보 비교해줘"
         )
@@ -501,6 +508,38 @@ class PatentTelegramBot:
             return self.help_text()
         if text == "/status":
             return self.status()
+        if text == "/pending":
+            return format_pending()
+        if text in {"/approve", "승인"}:
+            pending = [item for item in load_pending().values() if item.get("status") == "pending"]
+            if len(pending) == 1:
+                action_id = pending[0]["id"]
+                result = execute_action(action_id, approved_by=f"telegram:{chat_id}")
+                return f"승인 처리 완료\n- id: {action_id}\n- result: {result}"
+            if not pending:
+                return "대기 중인 승인 요청이 없어."
+            return format_pending() + "\n\n여러 건이라 id까지 보내줘. 예: 승인 " + pending[0]["id"]
+        if text.startswith("/approve ") or text.startswith("승인 "):
+            action_id = text.removeprefix("/approve").strip() if text.startswith("/approve") else text.removeprefix("승인").strip()
+            if not action_id:
+                return "승인할 요청 id를 같이 보내줘. 예: 승인 restart_minimal_0508091200"
+            result = execute_action(action_id, approved_by=f"telegram:{chat_id}")
+            return f"승인 처리 완료\n- id: {action_id}\n- result: {result}"
+        if text in {"/reject", "거절"}:
+            pending = [item for item in load_pending().values() if item.get("status") == "pending"]
+            if len(pending) == 1:
+                action_id = pending[0]["id"]
+                result = reject_action(action_id, rejected_by=f"telegram:{chat_id}")
+                return f"거절 처리 완료\n- id: {action_id}\n- result: {result}"
+            if not pending:
+                return "대기 중인 승인 요청이 없어."
+            return format_pending() + "\n\n여러 건이라 id까지 보내줘. 예: 거절 " + pending[0]["id"]
+        if text.startswith("/reject ") or text.startswith("거절 "):
+            action_id = text.removeprefix("/reject").strip() if text.startswith("/reject") else text.removeprefix("거절").strip()
+            if not action_id:
+                return "거절할 요청 id를 같이 보내줘. 예: 거절 restart_minimal_0508091200"
+            result = reject_action(action_id, rejected_by=f"telegram:{chat_id}")
+            return f"거절 처리 완료\n- id: {action_id}\n- result: {result}"
         if text.startswith("/search"):
             query, search_limit = parse_limited_query(text.removeprefix("/search").strip(), self.limit)
             if not query:

@@ -57,9 +57,17 @@ def list_target_pdfs(args: argparse.Namespace) -> List[Path]:
         pdfs = builder.list_pdfs(A4_INBOX, recursive=args.recursive)
     else:
         pdfs = []
+    unique_pdfs: List[Path] = []
+    seen_stems = set()
+    for pdf in pdfs:
+        stem = pdf.stem.lower()
+        if stem in seen_stems:
+            continue
+        seen_stems.add(stem)
+        unique_pdfs.append(pdf)
     if args.limit and args.limit > 0:
-        return pdfs[: args.limit]
-    return pdfs
+        return unique_pdfs[: args.limit]
+    return unique_pdfs
 
 
 def table_count(db_path: Path, table: str) -> int:

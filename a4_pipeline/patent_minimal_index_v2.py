@@ -80,7 +80,7 @@ def load_json(path: Path) -> Dict[str, Any]:
 
 
 def open_db() -> sqlite3.Connection:
-    con = sqlite3.connect(A4_DB)
+    con = sqlite3.connect(A4_DB, timeout=30)
     con.row_factory = sqlite3.Row
     return con
 
@@ -109,6 +109,24 @@ def normalize_tag(text: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "_", s)
     s = re.sub(r"_+", "_", s).strip("_")
     return s
+
+
+def clean_title(value: Any) -> str:
+    title = normalize_ws(value)
+    title = re.split(
+        r"(?:\(\s*57\s*\)|摘要|ABSTRACT|Abstract|权利要求书|청구범위|청구항|Claims?:|What is claimed is)",
+        title,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    title = re.sub(r"^\s*\(?\s*54\s*\)?\s*(发明名称|Title)?\s*", "", title, flags=re.I)
+    title = re.split(r"\(\s*(?:71|72|73)\s*\)|Applicant:|Inventor:|Assignee:", title, maxsplit=1, flags=re.I)[0]
+    return normalize_ws(title)[:240]
+
+
+def source_language_from_country(country: Any, patent_id: Any) -> str:
+    code = normalize_ws(country).upper() or normalize_ws(patent_id)[:2].upper()
+    return {"CN": "zh", "US": "en", "KR": "ko"}.get(code, "unknown")
 
 
 def normalize_tags(values: List[str], max_items: int) -> List[str]:
@@ -146,12 +164,24 @@ def fetch_next_patent_id(con: sqlite3.Connection, explicit_patent_id: Optional[s
         """
         SELECT patent_id
         FROM jobs
-        WHERE status IN ('evidence_done', 'brief_done', 'profile_done', 'analysis_failed')
+        WHERE status='evidence_done'
         ORDER BY updated_at ASC, patent_id ASC
         LIMIT 1
         """
     ).fetchone()
     return row["patent_id"] if row else None
+
+
+def mark_job_status(con: sqlite3.Connection, patent_id: str, status: str) -> None:
+    con.execute(
+        """
+        UPDATE jobs
+        SET status=?, updated_at=?
+        WHERE patent_id=?
+        """,
+        (status, datetime.now().isoformat(timespec="seconds"), patent_id),
+    )
+    con.commit()
 
 
 def get_patent_meta(con: sqlite3.Connection, patent_id: str) -> Dict[str, Any]:
@@ -507,6 +537,8 @@ def validate_llm_part(result: Dict[str, Any]) -> None:
         raise RuntimeError("minimal empty core_subject")
     if not result.get("core_elements_ko"):
         raise RuntimeError("minimal empty core_elements_ko")
+    if not result.get("solution_labels"):
+        raise RuntimeError("minimal empty solution_labels")
     if not result.get("evidence_ids"):
         raise RuntimeError("minimal empty evidence_ids")
 
@@ -519,6 +551,8 @@ def build_final_minimal(
     candidate_evidence_ids: List[str],
 ) -> Dict[str, Any]:
     valid_ids = set(candidate_evidence_ids)
+    title = clean_title(meta.get("title_raw", ""))
+    source_language = source_language_from_country(meta.get("country"), meta.get("patent_id"))
 
     evidence_ids = []
     for x in llm_part.get("evidence_ids", []):
@@ -531,8 +565,10 @@ def build_final_minimal(
 
     final = {
         "patent_id": meta["patent_id"],
-        "title_source": meta.get("title_raw", ""),
-        "title_ko": meta.get("title_raw", ""),
+        "country": meta.get("country", ""),
+        "source_language": source_language,
+        "title_source": title,
+        "title_ko": title,
         "primary_claim_type": primary_claim_type,
         "secondary_claim_types": secondary_claim_types,
         "core_subject": normalize_ws(llm_part.get("core_subject", "")),
@@ -551,10 +587,16 @@ def validate_final(result: Dict[str, Any], patent_id: str) -> None:
         raise RuntimeError("final patent_id mismatch")
     if not normalize_ws(result.get("title_source", "")):
         raise RuntimeError("final empty title_source")
+    if re.search(r"(权利要求|청구항|Claims?:|Abstract|摘要|발명의 설명)", str(result.get("title_source", "")), flags=re.I):
+        raise RuntimeError("final contaminated title_source")
+    if not normalize_ws(result.get("source_language", "")):
+        raise RuntimeError("final empty source_language")
     if not normalize_ws(result.get("core_subject", "")):
         raise RuntimeError("final empty core_subject")
     if not result.get("core_elements_ko"):
         raise RuntimeError("final empty core_elements_ko")
+    if not result.get("solution_labels"):
+        raise RuntimeError("final empty solution_labels")
     if not result.get("evidence_ids"):
         raise RuntimeError("final empty evidence_ids")
     if not result.get("primary_claim_type"):
@@ -564,13 +606,20 @@ def validate_final(result: Dict[str, Any], patent_id: str) -> None:
 def process_one_patent(con: sqlite3.Connection, patent_id: str, overwrite: bool = False) -> Dict[str, Any]:
     out_path = MINIMAL_DIR / f"{safe_name(patent_id)}.minimal.json"
     if out_path.exists() and not overwrite:
-        log(f"[캐시 사용] {out_path.name}")
-        return {
-            "patent_id": patent_id,
-            "output_path": str(out_path),
-            "elapsed": 0.0,
-            "loaded_from_cache": True,
-        }
+        try:
+            cached = json.loads(out_path.read_text(encoding="utf-8"))
+            validate_final(cached, patent_id)
+        except Exception as exc:
+            log(f"[캐시 무효] {out_path.name}: {exc}; regenerate")
+        else:
+            log(f"[캐시 사용] {out_path.name}")
+            mark_job_status(con, patent_id, "brief_done")
+            return {
+                "patent_id": patent_id,
+                "output_path": str(out_path),
+                "elapsed": 0.0,
+                "loaded_from_cache": True,
+            }
 
     meta = get_patent_meta(con, patent_id)
     claims = get_claims(con, patent_id)
@@ -631,6 +680,7 @@ def process_one_patent(con: sqlite3.Connection, patent_id: str, overwrite: bool 
     }
 
     save_json(out_path, final)
+    mark_job_status(con, patent_id, "brief_done")
 
     return {
         "patent_id": patent_id,
@@ -696,6 +746,10 @@ def main() -> None:
                 log(f"      · 소요 시간: {human_seconds(result['elapsed'])}")
             except Exception as e:
                 failed += 1
+                try:
+                    mark_job_status(con, patent_id, "minimal_failed")
+                except Exception as mark_error:
+                    log(f"      상태 업데이트 실패: {mark_error}")
                 log(f"    ✗ 실패: {patent_id}")
                 log(f"      오류: {e}")
                 log(f"      · 소요 시간: {human_seconds(time.time() - item_start)}")

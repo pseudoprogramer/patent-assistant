@@ -64,6 +64,39 @@ def compact_snippets(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def compact_claims(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    claims = item.get("independent_claims") or item.get("claims") or []
+    out = []
+    for claim in claims[:4]:
+        claim_no = str(claim.get("claim_no") or claim.get("id") or "").strip()
+        text = normalize_ws(claim.get("raw_text") or claim.get("text") or claim.get("norm_text"))
+        if not claim_no or not text:
+            continue
+        out.append(
+            {
+                "id": f"claim_{claim_no}",
+                "claim_no": claim_no,
+                "text": text[:900],
+            }
+        )
+    return out
+
+
+def flatten_ids(value: Any) -> List[str]:
+    if isinstance(value, dict):
+        out: List[str] = []
+        for nested in value.values():
+            out.extend(flatten_ids(nested))
+        return out
+    if isinstance(value, list):
+        return [str(x) for x in value]
+    if isinstance(value, tuple):
+        return [str(x) for x in value]
+    if value:
+        return [str(value)]
+    return []
+
+
 def repair_one(
     client: LLMClient | None,
     item: Dict[str, Any],
@@ -72,22 +105,29 @@ def repair_one(
     timeout_sec: int,
 ) -> Dict[str, Any]:
     snippets = compact_snippets(item)
+    claims = compact_claims(item)
     valid_snippet_ids = {str(snippet.get("id")) for snippet in snippets if snippet.get("id")}
+    valid_claim_ids = {str(claim.get("id")) for claim in claims if claim.get("id")}
     prompt = f"""
-You are repairing only the problem/effect fields of a patent dictionary card.
-Use only the provided evidence snippets.
+You are repairing only the problem/solution/effect fields of a patent dictionary card.
+Use only the provided independent claims and evidence snippets.
 If evidence is weak, return empty arrays and lower confidence.
 Return exactly one JSON object with:
 - problem_labels: array, only from allowed problem labels
+- solution_labels: array of concise lower_snake_case labels derived only from the independent claims
 - effect_labels: array, only from allowed effect labels
 - supporting_snippet_ids: array of snippet ids that directly support the selected labels
+- supporting_claim_ids: array of claim ids that directly support selected solution labels
 - why_needed: one concise phrase in the patent source language
 - expected_effect: one concise phrase in the patent source language
 - confidence: number 0..1
 
 Rules:
 - Do not select a label unless it is directly supported by at least one snippet id.
+- Do not create solution_labels unless directly supported by at least one independent claim id.
 - If no snippet directly supports a field, leave that field empty.
+- If no independent claim directly supports a solution field, leave solution_labels empty.
+- solution_labels must describe concrete technical means, not broad goals.
 - why_needed and expected_effect must be copied or tightly paraphrased from the snippets.
 
 Allowed problem labels:
@@ -100,6 +140,9 @@ Patent:
 patent_id={item.get("patent_id")}
 country={item.get("country")}
 title={item.get("title")}
+
+Independent claims:
+{json.dumps(claims, ensure_ascii=False, indent=2)}
 
 Evidence snippets:
 {json.dumps(snippets, ensure_ascii=False, indent=2)}
@@ -129,16 +172,21 @@ Evidence snippets:
         text = ""
         status = "failed"
         error = repr(exc)
-    support_ids = [str(x) for x in parsed.get("supporting_snippet_ids", []) if str(x) in valid_snippet_ids]
+    support_ids = [str(x) for x in flatten_ids(parsed.get("supporting_snippet_ids")) if str(x) in valid_snippet_ids]
+    claim_support_ids = [str(x) for x in flatten_ids(parsed.get("supporting_claim_ids")) if str(x) in valid_claim_ids]
     quality_flags = []
     if (parsed.get("problem_labels") or parsed.get("effect_labels")) and not support_ids:
         quality_flags.append("missing_supporting_snippet_ids")
+    if parsed.get("solution_labels") and claims and not claim_support_ids:
+        quality_flags.append("missing_supporting_claim_ids")
     if parsed.get("problem_labels") and not normalize_ws(parsed.get("why_needed")):
         quality_flags.append("missing_why_needed")
     if parsed.get("effect_labels") and not normalize_ws(parsed.get("expected_effect")):
         quality_flags.append("missing_expected_effect")
     if support_ids != parsed.get("supporting_snippet_ids"):
         parsed["supporting_snippet_ids"] = support_ids
+    if claim_support_ids != parsed.get("supporting_claim_ids"):
+        parsed["supporting_claim_ids"] = claim_support_ids
     return {
         "patent_id": item.get("patent_id"),
         "country": item.get("country"),
